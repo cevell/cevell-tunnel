@@ -19,6 +19,8 @@ Verifies hardware claims from Confidential Virtual Machines:
   7. Cryptographic extraction of verified in-enclave HPKE Public Key.
 """
 
+import os
+import json
 import base64
 import hashlib
 import struct
@@ -91,7 +93,177 @@ class AttestationResult:
     td_attributes: Optional[str] = None
     vendor_crl_verified: bool = False
     auth_public_key: Optional[str] = None
+    code_verified: bool = False
+    code_release: Optional[str] = None
+    code_roothash: Optional[str] = None
     is_valid: bool = True
+
+
+# Pinned official release golden measurements (built-in zero-network fallback)
+PINNED_RELEASE_MEASUREMENTS: Dict[str, Dict[str, Any]] = {
+    "v1.0.0": {
+        "roothash": "afbcde7a4cdf2b3593a6d843426dd51a46a8cfd0062c5ae2f9244038d645a796",
+        "intel_tdx": {
+            "mrtd": "c1ee9c16e3afc506cfe042c5b846a368528f3b37618eafb27469bc114cf914e9222c91618470e7f2b28ac360968270a5",
+            "rtmr0": "04ba9d61160dd138049b43c0c43b2a8708ad2b991a41e1defc32d7cbd2a231cf5b1920c227e1c875f24bf5e1b9583c82",
+            "rtmr1": "88871f187132fdb0341e8fdb148f95ac7b456bdcc81831a32f09b61273886b1ade872ce8011226aa8d9fbd980a28560d",
+            "rtmr2": "8879abbe5d09520e993f494e46302bbd6b0c7a69cc2cee131235b95956b4d3dc090de267cbe5c9cc69baa76084c307e9",
+            "rtmr3": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        },
+    }
+}
+
+
+class ReleaseMeasurementManager:
+    """
+    Fetches, caches, and verifies golden OS release measurements from GitHub releases.
+    Maintains a 24-hour local disk cache to minimize network overhead and avoid API rate limits.
+    """
+    def __init__(self, cache_ttl: float = 86400.0, request_timeout: float = 5.0, cache_dir: Optional[str] = None):
+        self.cache_ttl = cache_ttl
+        self.request_timeout = request_timeout
+        if cache_dir:
+            self.cache_dir = cache_dir
+        else:
+            home = os.path.expanduser("~")
+            self.cache_dir = os.path.join(home, ".cache", "cevell", "measurements")
+        os.makedirs(self.cache_dir, exist_ok=True)
+        self._memory_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
+
+    def fetch_measurements(self, release_tag: str = "v1.0.0") -> Dict[str, Any]:
+        """
+        Fetches golden measurements JSON for the specified release tag.
+        Checks in-memory cache, then 24h disk cache, then downloads from GitHub release.
+        Falls back to pinned measurements if network is unreachable.
+        """
+        now = time.time()
+        # 1. In-memory cache
+        if release_tag in self._memory_cache:
+            data, fetch_time = self._memory_cache[release_tag]
+            if now - fetch_time < self.cache_ttl:
+                return data
+
+        # 2. Disk cache (~/.cache/cevell/measurements/<tag>.json)
+        disk_cache_file = os.path.join(self.cache_dir, f"{release_tag}.json")
+        if os.path.exists(disk_cache_file):
+            try:
+                mtime = os.path.getmtime(disk_cache_file)
+                if now - mtime < self.cache_ttl:
+                    with open(disk_cache_file, "r") as f:
+                        data = json.load(f)
+                    self._memory_cache[release_tag] = (data, mtime)
+                    return data
+            except Exception:
+                pass
+
+        # 3. Live network fetch from GitHub release
+        urls = [
+            f"https://github.com/cevell/private-ai/releases/download/{release_tag}/measurements.json",
+            f"https://raw.githubusercontent.com/cevell/private-ai/main/measurements.json",
+        ]
+        data = None
+        for url in urls:
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Cevell-Tunnel/1.0"})
+                with urllib.request.urlopen(req, timeout=self.request_timeout) as resp:
+                    if resp.status == 200:
+                        raw = resp.read().decode("utf-8")
+                        data = json.loads(raw)
+                        break
+            except Exception:
+                continue
+
+        if data:
+            try:
+                with open(disk_cache_file, "w") as f:
+                    json.dump(data, f, indent=2)
+            except Exception:
+                pass
+            self._memory_cache[release_tag] = (data, now)
+            return data
+
+        # 4. Fallback to existing disk cache even if expired
+        if os.path.exists(disk_cache_file):
+            try:
+                with open(disk_cache_file, "r") as f:
+                    data = json.load(f)
+                return data
+            except Exception:
+                pass
+
+        # 5. Fallback to built-in pinned measurement table
+        if release_tag in PINNED_RELEASE_MEASUREMENTS:
+            return PINNED_RELEASE_MEASUREMENTS[release_tag]
+
+        raise AttestationVerificationError(
+            f"Unable to retrieve golden measurements for release '{release_tag}' from GitHub or local cache"
+        )
+
+    def verify_code_measurements(
+        self,
+        attestation: AttestationResult,
+        expected_release: str = "v1.0.0",
+        expected_rtmr1: Optional[str] = None,
+        expected_mrtd: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Cross-verifies CVM attestation registers (rtmr1, mrtd) against golden release measurements.
+        """
+        if expected_rtmr1:
+            golden_rtmr1 = expected_rtmr1.lower().strip()
+            golden_roothash = None
+            release_id = "custom"
+        else:
+            measurements = self.fetch_measurements(expected_release)
+            release_id = measurements.get("version", expected_release)
+            golden_roothash = measurements.get("roothash")
+            intel_m = measurements.get("measurements", {}).get("intel_tdx", {})
+            golden_rtmr1 = intel_m.get("rtmr1", "").lower().strip()
+            if not expected_mrtd:
+                expected_mrtd = intel_m.get("mrtd", "").lower().strip()
+
+        if not golden_rtmr1:
+            raise AttestationVerificationError(
+                f"No golden RTMR1 measurement available for release '{expected_release}'"
+            )
+
+        actual_rtmr1 = (attestation.rtmr1 or "").lower().strip()
+        if not actual_rtmr1:
+            raise AttestationVerificationError(
+                "Attestation result missing RTMR1 register: cannot verify CVM code measurement"
+            )
+
+        if actual_rtmr1 != golden_rtmr1:
+            raise AttestationVerificationError(
+                f"CVM code measurement mismatch! The running CVM does not match release {release_id}.\n"
+                f"  Expected RTMR1: {golden_rtmr1}\n"
+                f"  Actual RTMR1:   {actual_rtmr1}\n"
+                f"Integrity check failed: VM is running unverified or modified kernel/rootfs code."
+            )
+
+        if expected_mrtd:
+            actual_mrtd = (attestation.mrtd or "").lower().strip()
+            if actual_mrtd and actual_mrtd != expected_mrtd:
+                raise AttestationVerificationError(
+                    f"CVM launch memory measurement mismatch (MRTD)!\n"
+                    f"  Expected MRTD: {expected_mrtd}\n"
+                    f"  Actual MRTD:   {actual_mrtd}"
+                )
+
+        attestation.code_verified = True
+        attestation.code_release = release_id
+        attestation.code_roothash = golden_roothash
+
+        return {
+            "verified": True,
+            "release": release_id,
+            "roothash": golden_roothash,
+            "rtmr1": actual_rtmr1,
+        }
+
+
+# Global in-memory and disk release measurement manager
+_GLOBAL_RELEASE_MANAGER = ReleaseMeasurementManager()
 
 
 class VendorCRLManager:
@@ -627,6 +799,10 @@ def verify_attestation_document(
     check_online_vendor: bool = True,
     strict_online: bool = False,
     allow_mock_attestation: bool = False,
+    verify_code: bool = False,
+    expected_release: Optional[str] = None,
+    expected_rtmr1: Optional[str] = None,
+    release_manager: Optional[ReleaseMeasurementManager] = None,
 ) -> AttestationResult:
     """
     Validates an in-toto Statement v1 envelope containing Confidential Computing claims.
@@ -638,6 +814,7 @@ def verify_attestation_document(
       - Verifies NVIDIA Hopper DICE X.509 cert chain and SPDM measurement signature.
       - Verifies AMD SEV-SNP policy, REPORT_DATA, and signature.
       - Checks vendor certificate revocation against online CRL endpoints.
+      - Cross-verifies CVM code measurements (RTMR1) against GitHub release golden measurements.
     """
     if not isinstance(doc, dict):
         raise AttestationVerificationError("Attestation document must be a JSON object")
@@ -797,7 +974,7 @@ def verify_attestation_document(
     # Cevell OS CVM server computes sha256.Sum256([]byte(cfg.AttestationDoc.Predicate.UserData))
     binding_hash = hashlib.sha256(user_data_hex.encode("utf-8")).digest()
 
-    return AttestationResult(
+    res = AttestationResult(
         hpke_public_key=hpke_pub,
         hpke_public_key_hex=hpke_pub_hex,
         tls_fingerprint=tls_fp_hex,
@@ -817,3 +994,13 @@ def verify_attestation_document(
         auth_public_key=auth_pub_hex or None,
         is_valid=True,
     )
+
+    if (verify_code or expected_release or expected_rtmr1) and not allow_mock_attestation:
+        mgr = release_manager or _GLOBAL_RELEASE_MANAGER
+        mgr.verify_code_measurements(
+            attestation=res,
+            expected_release=expected_release or "v1.0.0",
+            expected_rtmr1=expected_rtmr1,
+        )
+
+    return res
