@@ -53,6 +53,21 @@ def main():
             action="store_true",
             help="Bypass hardware attestation verification",
         )
+        proxy_parser.add_argument(
+            "--no-verify-code",
+            action="store_true",
+            help="Bypass guest OS/kernel code measurement verification against official releases",
+        )
+        proxy_parser.add_argument(
+            "--release",
+            default="v1.0.0",
+            help="Expected official GitHub release tag for code measurement verification (default: v1.0.0)",
+        )
+        proxy_parser.add_argument(
+            "--expected-rtmr1",
+            default=None,
+            help="Explicit expected RTMR1 measurement hash (overrides GitHub release lookup)",
+        )
         args = proxy_parser.parse_args(sys.argv[2:])
         proxy = LocalCVMProxy(
             ip=args.ip,
@@ -61,6 +76,9 @@ def main():
             listen_host=args.listen_host,
             listen_port=args.listen_port,
             verify_attestation=not args.no_attestation,
+            verify_code=not args.no_verify_code,
+            expected_release=args.release,
+            expected_rtmr1=args.expected_rtmr1,
         )
         proxy.start()
         return
@@ -118,6 +136,21 @@ def main():
             action="store_true",
             help="Bypass hardware attestation verification (e.g. for development CVMs)",
         )
+        load_parser.add_argument(
+            "--no-verify-code",
+            action="store_true",
+            help="Bypass guest OS/kernel code measurement verification against official releases",
+        )
+        load_parser.add_argument(
+            "--release",
+            default="v1.0.0",
+            help="Expected official GitHub release tag for code measurement verification (default: v1.0.0)",
+        )
+        load_parser.add_argument(
+            "--expected-rtmr1",
+            default=None,
+            help="Explicit expected RTMR1 measurement hash (overrides GitHub release lookup)",
+        )
         args = load_parser.parse_args(sys.argv[2:])
         print(f"[*] Initializing connection to CVM at {args.ip}:{args.port}...")
         try:
@@ -126,6 +159,9 @@ def main():
                 port=args.port,
                 auth_key=args.key,
                 verify_attestation=not args.no_attestation,
+                verify_code=not args.no_verify_code,
+                expected_release=args.release,
+                expected_rtmr1=args.expected_rtmr1,
             )
         except Exception as e:
             print(f"[-] Initialization / Attestation failure: {e}", file=sys.stderr)
@@ -228,6 +264,21 @@ def main():
         help="Bypass hardware attestation verification (e.g. for development or spot CVMs without quote devices)",
     )
     parser.add_argument(
+        "--no-verify-code",
+        action="store_true",
+        help="Bypass guest OS/kernel code measurement verification against official releases",
+    )
+    parser.add_argument(
+        "--release",
+        default="v1.0.0",
+        help="Expected official GitHub release tag for code measurement verification (default: v1.0.0)",
+    )
+    parser.add_argument(
+        "--expected-rtmr1",
+        default=None,
+        help="Explicit expected RTMR1 measurement hash (overrides GitHub release lookup)",
+    )
+    parser.add_argument(
         "--proxy",
         action="store_true",
         help="Start local confidential loopback proxy server instead of executing a prompt",
@@ -254,6 +305,9 @@ def main():
             listen_host=args.listen_host,
             listen_port=args.listen_port,
             verify_attestation=not args.no_attestation,
+            verify_code=not args.no_verify_code,
+            expected_release=args.release,
+            expected_rtmr1=args.expected_rtmr1,
         )
         proxy.start()
         return
@@ -266,6 +320,9 @@ def main():
             auth_key=args.key,
             default_model=args.model,
             verify_attestation=not args.no_attestation,
+            verify_code=not args.no_verify_code,
+            expected_release=args.release,
+            expected_rtmr1=args.expected_rtmr1,
         )
     except Exception as e:
         print(f"[-] Initialization / Attestation failure: {e}", file=sys.stderr)
@@ -279,6 +336,14 @@ def main():
         print(f"  Platform:         {att.platform.upper()}")
         print(f"  GPU Hardware:     {att.gpu_model or 'CPU Enclave'}")
         print(f"  GPU Architecture: {att.gpu_arch or 'N/A'}")
+        if att.code_verified:
+            print(f"  Code Integrity:   VERIFIED (Release {att.code_release})")
+            if att.code_roothash:
+                print(f"  dm-verity Root:   {att.code_roothash}")
+            if att.rtmr1:
+                print(f"  RTMR1 Digest:     {att.rtmr1[:32]}...")
+        elif att.rtmr1:
+            print(f"  RTMR1 Digest:     {att.rtmr1[:32]}... (unverified)")
         print(f"  TLS Fingerprint:  {att.tls_fingerprint[:32]}...")
         print(f"  HPKE Public Key:  {att.hpke_public_key_hex[:32]}...")
         print("  Root CA Trust:    Anchored to official Intel/NVIDIA Silicon Roots")
