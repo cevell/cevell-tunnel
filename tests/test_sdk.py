@@ -44,6 +44,7 @@ from cevell_tunnel.attestation import (
     verify_intel_tdx_quote,
     verify_nvidia_gpu_evidence,
     VendorCRLManager,
+    ReleaseMeasurementManager,
     AttestationVerificationError,
     OFFICIAL_NVIDIA_ROOT_CA_PEM,
     OFFICIAL_INTEL_ROOT_CA_PEM,
@@ -325,6 +326,62 @@ class TestOxSDK(unittest.TestCase):
         self.assertTrue(res.vendor_crl_verified)
         self.assertIsNotNone(res.mrtd)
         self.assertIsNotNone(res.td_attributes)
+
+    def test_code_measurement_verification_and_24h_caching(self):
+        attestation_path = get_attestation_path()
+        if not attestation_path or not os.path.exists(attestation_path):
+            self.skipTest("attestation.json fixture not found")
+
+        with open(attestation_path, "r") as f:
+            doc = json.load(f)
+
+        # 1. Verification succeeds against official release v1.0.0
+        res = verify_attestation_document(
+            doc=doc,
+            expected_nonce_hex=doc["predicate"]["nonce"],
+            expected_tls_fingerprint=doc["predicate"]["tls_fingerprint"],
+            enforce_official_roots=True,
+            check_online_vendor=False,
+            verify_code=True,
+            expected_release="v1.0.0",
+        )
+        self.assertTrue(res.code_verified)
+        self.assertEqual(res.code_release, "v1.0.0")
+        self.assertEqual(res.code_roothash, "afbcde7a4cdf2b3593a6d843426dd51a46a8cfd0062c5ae2f9244038d645a796")
+
+        # 2. Mismatched RTMR1 measurement raises AttestationVerificationError
+        with self.assertRaises(AttestationVerificationError) as ctx:
+            verify_attestation_document(
+                doc=doc,
+                expected_nonce_hex=doc["predicate"]["nonce"],
+                expected_tls_fingerprint=doc["predicate"]["tls_fingerprint"],
+                enforce_official_roots=True,
+                check_online_vendor=False,
+                verify_code=True,
+                expected_rtmr1="00" * 48,
+            )
+        self.assertIn("CVM code measurement mismatch", str(ctx.exception))
+
+        # 3. Test ReleaseMeasurementManager disk caching with 24h TTL
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            mgr = ReleaseMeasurementManager(cache_ttl=86400.0, cache_dir=tmp_dir)
+            cached_data = mgr.fetch_measurements("v1.0.0")
+            self.assertEqual(cached_data["version"], "v1.0.0")
+            cache_file = os.path.join(tmp_dir, "v1.0.0.json")
+            self.assertTrue(os.path.exists(cache_file))
+
+            # Modify file content to prove cache is read without network hit
+            with open(cache_file, "r") as cf:
+                loaded = json.load(cf)
+            loaded["custom_marker"] = "cached_disk_test"
+            with open(cache_file, "w") as cf:
+                json.dump(loaded, cf)
+
+            # Re-instantiate manager with same cache dir
+            mgr2 = ReleaseMeasurementManager(cache_ttl=86400.0, cache_dir=tmp_dir)
+            re_read = mgr2.fetch_measurements("v1.0.0")
+            self.assertEqual(re_read.get("custom_marker"), "cached_disk_test")
 
     def test_intel_tdx_quote_cryptographic_verification(self):
         attestation_path = get_attestation_path()
