@@ -128,6 +128,9 @@ class CVMClient:
         auth_key: Union[str, bytes] = "auth.pem",
         default_model: Optional[str] = None,
         verify_attestation: bool = True,
+        verify_code: bool = True,
+        expected_release: Optional[str] = "v1.0.0",
+        expected_rtmr1: Optional[str] = None,
         enforce_official_roots: bool = True,
         check_online_vendor: bool = True,
         timeout: float = 60.0,
@@ -158,6 +161,9 @@ class CVMClient:
         self.default_model = default_model
         self.timeout = timeout
         self.verify_attestation_enabled = verify_attestation
+        self.verify_code = verify_code
+        self.expected_release = expected_release
+        self.expected_rtmr1 = expected_rtmr1
         self.enforce_official_roots = enforce_official_roots
         self.check_online_vendor = check_online_vendor
         self.allow_mock_attestation = allow_mock_attestation
@@ -223,6 +229,9 @@ class CVMClient:
             enforce_official_roots=self.enforce_official_roots,
             check_online_vendor=self.check_online_vendor,
             allow_mock_attestation=self.allow_mock_attestation,
+            verify_code=self.verify_code and not self.allow_mock_attestation,
+            expected_release=self.expected_release,
+            expected_rtmr1=self.expected_rtmr1,
         )
 
         # In Cevell OS CVM, the proxy server unwraps Protobuf HPKE requests against the boot attestation document
