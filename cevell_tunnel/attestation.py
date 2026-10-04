@@ -99,27 +99,14 @@ class AttestationResult:
     is_valid: bool = True
 
 
-# Pinned official release golden measurements (built-in zero-network fallback)
-PINNED_RELEASE_MEASUREMENTS: Dict[str, Dict[str, Any]] = {
-    "v1.0.0": {
-        "roothash": "afbcde7a4cdf2b3593a6d843426dd51a46a8cfd0062c5ae2f9244038d645a796",
-        "intel_tdx": {
-            "mrtd": "c1ee9c16e3afc506cfe042c5b846a368528f3b37618eafb27469bc114cf914e9222c91618470e7f2b28ac360968270a5",
-            "rtmr0": "04ba9d61160dd138049b43c0c43b2a8708ad2b991a41e1defc32d7cbd2a231cf5b1920c227e1c875f24bf5e1b9583c82",
-            "rtmr1": "88871f187132fdb0341e8fdb148f95ac7b456bdcc81831a32f09b61273886b1ade872ce8011226aa8d9fbd980a28560d",
-            "rtmr2": "8879abbe5d09520e993f494e46302bbd6b0c7a69cc2cee131235b95956b4d3dc090de267cbe5c9cc69baa76084c307e9",
-            "rtmr3": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-        },
-    }
-}
-
-
 class ReleaseMeasurementManager:
     """
-    Fetches, caches, and verifies golden OS release measurements from GitHub releases.
-    Maintains a 24-hour local disk cache to minimize network overhead and avoid API rate limits.
+    Dynamically fetches, caches, and verifies golden OS release measurements from GitHub releases.
+    Maintains a 24-hour local disk cache to minimize network overhead and avoid API rate limits,
+    with automatic cache-invalidation and re-fetch if a measurement mismatch is encountered (auto-update resilience).
+    Never hardcodes silicon keys or hashes in source code.
     """
-    def __init__(self, cache_ttl: float = 86400.0, request_timeout: float = 5.0, cache_dir: Optional[str] = None):
+    def __init__(self, cache_ttl: float = 86400.0, request_timeout: float = 8.0, cache_dir: Optional[str] = None):
         self.cache_ttl = cache_ttl
         self.request_timeout = request_timeout
         if cache_dir:
@@ -130,41 +117,55 @@ class ReleaseMeasurementManager:
         os.makedirs(self.cache_dir, exist_ok=True)
         self._memory_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
 
-    def fetch_measurements(self, release_tag: str = "v1.0.0") -> Dict[str, Any]:
+    def fetch_measurements(self, release_tag: str = "latest", force_refresh: bool = False) -> Dict[str, Any]:
         """
-        Fetches golden measurements JSON for the specified release tag.
-        Checks in-memory cache, then 24h disk cache, then downloads from GitHub release.
-        Falls back to pinned measurements if network is unreachable.
+        Dynamically fetches golden measurements JSON for the specified release tag (or 'latest').
+        Checks 24h disk cache unless force_refresh is requested.
+        Queries GitHub release endpoints dynamically.
         """
+        tag = (release_tag or "latest").strip()
         now = time.time()
-        # 1. In-memory cache
-        if release_tag in self._memory_cache:
-            data, fetch_time = self._memory_cache[release_tag]
+
+        # 1. In-memory cache check
+        if not force_refresh and tag in self._memory_cache:
+            data, fetch_time = self._memory_cache[tag]
             if now - fetch_time < self.cache_ttl:
                 return data
 
-        # 2. Disk cache (~/.cache/cevell/measurements/<tag>.json)
-        disk_cache_file = os.path.join(self.cache_dir, f"{release_tag}.json")
-        if os.path.exists(disk_cache_file):
+        # 2. Disk cache check (~/.cache/cevell/measurements/<tag>.json)
+        disk_cache_file = os.path.join(self.cache_dir, f"{tag}.json")
+        if not force_refresh and os.path.exists(disk_cache_file):
             try:
                 mtime = os.path.getmtime(disk_cache_file)
                 if now - mtime < self.cache_ttl:
                     with open(disk_cache_file, "r") as f:
                         data = json.load(f)
-                    self._memory_cache[release_tag] = (data, mtime)
+                    self._memory_cache[tag] = (data, mtime)
                     return data
             except Exception:
                 pass
 
-        # 3. Live network fetch from GitHub release
-        urls = [
-            f"https://github.com/cevell/private-ai/releases/download/{release_tag}/measurements.json",
-            f"https://raw.githubusercontent.com/cevell/private-ai/main/measurements.json",
-        ]
+        # 3. Dynamic live network fetch from GitHub release endpoints
+        if tag in ("latest", "default"):
+            urls = [
+                "https://github.com/cevell/private-ai/releases/latest/download/measurements.json",
+                "https://raw.githubusercontent.com/cevell/private-ai/main/measurements.json",
+            ]
+        else:
+            urls = [
+                f"https://github.com/cevell/private-ai/releases/download/{tag}/measurements.json",
+                f"https://raw.githubusercontent.com/cevell/private-ai/{tag}/measurements.json",
+                "https://github.com/cevell/private-ai/releases/latest/download/measurements.json",
+                "https://raw.githubusercontent.com/cevell/private-ai/main/measurements.json",
+            ]
+
         data = None
         for url in urls:
             try:
-                req = urllib.request.Request(url, headers={"User-Agent": "Cevell-Tunnel/1.0"})
+                req = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "Cevell-Tunnel/1.0", "Accept": "application/json, */*"}
+                )
                 with urllib.request.urlopen(req, timeout=self.request_timeout) as resp:
                     if resp.status == 200:
                         raw = resp.read().decode("utf-8")
@@ -179,10 +180,10 @@ class ReleaseMeasurementManager:
                     json.dump(data, f, indent=2)
             except Exception:
                 pass
-            self._memory_cache[release_tag] = (data, now)
+            self._memory_cache[tag] = (data, now)
             return data
 
-        # 4. Fallback to existing disk cache even if expired
+        # 4. Fallback to existing disk cache even if expired (>24h) when network is unreachable
         if os.path.exists(disk_cache_file):
             try:
                 with open(disk_cache_file, "r") as f:
@@ -191,64 +192,104 @@ class ReleaseMeasurementManager:
             except Exception:
                 pass
 
-        # 5. Fallback to built-in pinned measurement table
-        if release_tag in PINNED_RELEASE_MEASUREMENTS:
-            return PINNED_RELEASE_MEASUREMENTS[release_tag]
-
         raise AttestationVerificationError(
-            f"Unable to retrieve golden measurements for release '{release_tag}' from GitHub or local cache"
+            f"Unable to dynamically retrieve golden measurements for release '{tag}' from online vendor repositories or local cache. "
+            "Please check network connectivity or specify --expected-rtmr1 directly."
         )
+
+    def _extract_measurement_entry(
+        self,
+        doc: Dict[str, Any],
+        actual_rtmr1: str,
+        requested_tag: str,
+    ) -> Tuple[str, str, Optional[str], Optional[str]]:
+        """Extracts (rtmr1, release_version, roothash, mrtd) from single-release or multi-release JSON."""
+        if "releases" in doc and isinstance(doc["releases"], dict):
+            for rel_name, rel_data in doc["releases"].items():
+                intel_m = rel_data.get("measurements", {}).get("intel_tdx", {})
+                r1 = intel_m.get("rtmr1", "").lower().strip()
+                if r1 and r1 == actual_rtmr1:
+                    return r1, rel_name, rel_data.get("roothash"), intel_m.get("mrtd", "").lower().strip()
+            if requested_tag in doc["releases"]:
+                rel_data = doc["releases"][requested_tag]
+                intel_m = rel_data.get("measurements", {}).get("intel_tdx", {})
+                return intel_m.get("rtmr1", "").lower().strip(), requested_tag, rel_data.get("roothash"), intel_m.get("mrtd", "").lower().strip()
+
+        release_id = doc.get("version", requested_tag)
+        golden_roothash = doc.get("roothash")
+        intel_m = doc.get("measurements", {}).get("intel_tdx", {})
+        golden_rtmr1 = intel_m.get("rtmr1", "").lower().strip()
+        mrtd = intel_m.get("mrtd", "").lower().strip()
+        return golden_rtmr1, release_id, golden_roothash, mrtd
 
     def verify_code_measurements(
         self,
         attestation: AttestationResult,
-        expected_release: str = "v1.0.0",
+        expected_release: str = "latest",
         expected_rtmr1: Optional[str] = None,
         expected_mrtd: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Cross-verifies CVM attestation registers (rtmr1, mrtd) against golden release measurements.
+        If a cached measurement does not match the running CVM, automatically forces a fresh
+        online fetch to support seamless CVM auto-updates.
         """
-        if expected_rtmr1:
-            golden_rtmr1 = expected_rtmr1.lower().strip()
-            golden_roothash = None
-            release_id = "custom"
-        else:
-            measurements = self.fetch_measurements(expected_release)
-            release_id = measurements.get("version", expected_release)
-            golden_roothash = measurements.get("roothash")
-            intel_m = measurements.get("measurements", {}).get("intel_tdx", {})
-            golden_rtmr1 = intel_m.get("rtmr1", "").lower().strip()
-            if not expected_mrtd:
-                expected_mrtd = intel_m.get("mrtd", "").lower().strip()
-
-        if not golden_rtmr1:
-            raise AttestationVerificationError(
-                f"No golden RTMR1 measurement available for release '{expected_release}'"
-            )
-
         actual_rtmr1 = (attestation.rtmr1 or "").lower().strip()
-        if not actual_rtmr1:
+        if not actual_rtmr1 and not expected_rtmr1:
             raise AttestationVerificationError(
                 "Attestation result missing RTMR1 register: cannot verify CVM code measurement"
             )
 
-        if actual_rtmr1 != golden_rtmr1:
-            raise AttestationVerificationError(
-                f"CVM code measurement mismatch! The running CVM does not match release {release_id}.\n"
-                f"  Expected RTMR1: {golden_rtmr1}\n"
-                f"  Actual RTMR1:   {actual_rtmr1}\n"
-                f"Integrity check failed: VM is running unverified or modified kernel/rootfs code."
+        if expected_rtmr1:
+            golden_rtmr1 = expected_rtmr1.lower().strip()
+            golden_roothash = None
+            release_id = "custom"
+            if actual_rtmr1 != golden_rtmr1:
+                raise AttestationVerificationError(
+                    f"CVM code measurement mismatch against custom expected RTMR1!\n"
+                    f"  Expected: {golden_rtmr1}\n"
+                    f"  Actual:   {actual_rtmr1}"
+                )
+        else:
+            tag = expected_release or "latest"
+            # 1. Fetch from cache or live
+            measurements = self.fetch_measurements(tag, force_refresh=False)
+            golden_rtmr1, release_id, golden_roothash, exp_mrtd = self._extract_measurement_entry(
+                measurements, actual_rtmr1, tag
             )
 
-        if expected_mrtd:
-            actual_mrtd = (attestation.mrtd or "").lower().strip()
-            if actual_mrtd and actual_mrtd != expected_mrtd:
+            # 2. If mismatch, force a fresh fetch from GitHub to check if the CVM auto-updated
+            if actual_rtmr1 != golden_rtmr1:
+                try:
+                    fresh_measurements = self.fetch_measurements(tag, force_refresh=True)
+                    fresh_rtmr1, fresh_id, fresh_root, fresh_mrtd = self._extract_measurement_entry(
+                        fresh_measurements, actual_rtmr1, tag
+                    )
+                    if actual_rtmr1 == fresh_rtmr1:
+                        golden_rtmr1 = fresh_rtmr1
+                        release_id = fresh_id
+                        golden_roothash = fresh_root
+                        exp_mrtd = fresh_mrtd
+                except Exception:
+                    pass
+
+            if actual_rtmr1 != golden_rtmr1:
                 raise AttestationVerificationError(
-                    f"CVM launch memory measurement mismatch (MRTD)!\n"
-                    f"  Expected MRTD: {expected_mrtd}\n"
-                    f"  Actual MRTD:   {actual_mrtd}"
+                    f"CVM code measurement mismatch! The running CVM does not match release {release_id}.\n"
+                    f"  Expected RTMR1: {golden_rtmr1}\n"
+                    f"  Actual RTMR1:   {actual_rtmr1}\n"
+                    f"Integrity check failed: VM is running unverified or modified kernel/rootfs code."
                 )
+
+            if expected_mrtd or exp_mrtd:
+                target_mrtd = (expected_mrtd or exp_mrtd or "").lower().strip()
+                actual_mrtd = (attestation.mrtd or "").lower().strip()
+                if actual_mrtd and target_mrtd and actual_mrtd != target_mrtd:
+                    raise AttestationVerificationError(
+                        f"CVM launch memory measurement mismatch (MRTD)!\n"
+                        f"  Expected MRTD: {target_mrtd}\n"
+                        f"  Actual MRTD:   {actual_mrtd}"
+                    )
 
         attestation.code_verified = True
         attestation.code_release = release_id
@@ -999,7 +1040,7 @@ def verify_attestation_document(
         mgr = release_manager or _GLOBAL_RELEASE_MANAGER
         mgr.verify_code_measurements(
             attestation=res,
-            expected_release=expected_release or "v1.0.0",
+            expected_release=expected_release or "latest",
             expected_rtmr1=expected_rtmr1,
         )
 
