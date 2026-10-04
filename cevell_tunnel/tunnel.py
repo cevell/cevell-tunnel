@@ -110,7 +110,7 @@ class ConfidentialTunnel:
         auth_key: Union[str, bytes] = "auth.pem",
         verify_attestation: bool = True,
         verify_code: bool = True,
-        expected_release: Optional[str] = "v1.0.0",
+        expected_release: Optional[str] = "latest",
         expected_rtmr1: Optional[str] = None,
         enforce_official_roots: bool = True,
         check_online_vendor: bool = True,

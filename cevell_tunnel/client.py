@@ -129,7 +129,7 @@ class CVMClient:
         default_model: Optional[str] = None,
         verify_attestation: bool = True,
         verify_code: bool = True,
-        expected_release: Optional[str] = "v1.0.0",
+        expected_release: Optional[str] = "latest",
         expected_rtmr1: Optional[str] = None,
         enforce_official_roots: bool = True,
         check_online_vendor: bool = True,
