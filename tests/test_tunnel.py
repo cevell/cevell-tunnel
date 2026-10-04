@@ -149,8 +149,8 @@ class MockCVMServer(BaseHTTPRequestHandler):
                 x25519.X25519PublicKey.from_public_bytes(client_pub_bytes)
             )
             req_key = HKDF(hashes.SHA256(), 32, None, b"cevell-hpke-req-aes-gcm").derive(shared_secret)
-            resp_key = HKDF(hashes.SHA256(), 32, None, b"cevell-hpke-resp-aes-gcm").derive(shared_secret)
-            resp_iv = HKDF(hashes.SHA256(), 12, None, b"cevell-hpke-resp-base-iv").derive(shared_secret)
+            resp_key = HKDF(hashes.SHA256(), 32, req_nonce, b"cevell-hpke-resp-aes-gcm").derive(shared_secret)
+            resp_iv = HKDF(hashes.SHA256(), 12, req_nonce, b"cevell-hpke-resp-base-iv").derive(shared_secret)
 
             plaintext = AESGCM(req_key).decrypt(req_nonce, ciphertext, None)
             req_json = json.loads(plaintext.decode("utf-8"))

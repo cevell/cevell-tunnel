@@ -65,12 +65,13 @@ def load_auth_key(key_input: Union[str, bytes, os.PathLike]) -> ed25519.Ed25519P
         expanded = os.path.expanduser(key_str)
         if os.path.isfile(expanded):
             with open(expanded, "rb") as f:
-                data = f.read().strip()
+                file_bytes = f.read()
+                data = file_bytes if len(file_bytes) in (32, 64) else file_bytes.strip()
         else:
             clean = key_str.strip()
             data = clean.encode("utf-8")
     elif isinstance(key_input, bytes):
-        data = key_input.strip()
+        data = key_input if len(key_input) in (32, 64) else key_input.strip()
     else:
         raise AuthKeyError(f"Unsupported key input type: {type(key_input)}")
 
@@ -202,6 +203,7 @@ class HPKESession:
         req_key: bytes,
         resp_key: bytes,
         resp_base_iv: bytes,
+        req_nonce: Optional[bytes] = None,
     ):
         self.client_pub_bytes = client_pub_bytes
         self._req_key = bytearray(req_key)
@@ -210,20 +212,36 @@ class HPKESession:
         self.req_key = bytes(self._req_key)
         self.resp_key = bytes(self._resp_key)
         self.resp_base_iv = bytes(self._resp_base_iv)
+        self.req_nonce = bytearray(req_nonce) if req_nonce is not None else None
         self._aead_req: Optional[AESGCM] = AESGCM(self.req_key)
         self._aead_resp: Optional[AESGCM] = AESGCM(self.resp_key)
         self.expected_seq: int = 0
 
-    def encrypt_request(self, plaintext: bytes, associated_data: Optional[bytes] = None) -> Tuple[bytes, bytes]:
+    def encrypt_request(
+        self,
+        plaintext: bytes,
+        associated_data: Optional[bytes] = None,
+        nonce: Optional[bytes] = None,
+    ) -> Tuple[bytes, bytes]:
         """
         Encrypts request plaintext using AES-256-GCM.
         Returns: (12-byte nonce, ciphertext_with_tag)
         """
         if self._aead_req is None:
             raise HPKEError("HPKESession has already been zeroized")
-        nonce = secrets.token_bytes(12)
-        ciphertext = self._aead_req.encrypt(nonce, plaintext, associated_data=associated_data)
-        return nonce, ciphertext
+        if nonce is not None:
+            if len(nonce) != 12:
+                raise HPKEError("Request nonce must be exactly 12 bytes")
+            if self.req_nonce is not None and nonce != bytes(self.req_nonce):
+                raise HPKEError("Passed nonce does not match session bound request nonce")
+            req_nonce = nonce
+        elif self.req_nonce is not None:
+            req_nonce = bytes(self.req_nonce)
+        else:
+            req_nonce = secrets.token_bytes(12)
+            self.req_nonce = bytearray(req_nonce)
+        ciphertext = self._aead_req.encrypt(req_nonce, plaintext, associated_data=associated_data)
+        return req_nonce, ciphertext
 
     def decrypt_frame(
         self,
@@ -258,6 +276,9 @@ class HPKESession:
         zeroize_buffer(self._req_key)
         zeroize_buffer(self._resp_key)
         zeroize_buffer(self._resp_base_iv)
+        if self.req_nonce is not None:
+            zeroize_buffer(self.req_nonce)
+            self.req_nonce = None
         self.req_key = b"\x00" * len(self.req_key)
         self.resp_key = b"\x00" * len(self.resp_key)
         self.resp_base_iv = b"\x00" * len(self.resp_base_iv)
@@ -266,9 +287,13 @@ class HPKESession:
         self.expected_seq = 0
 
 
-def create_client_hpke_session(server_pub_bytes: bytes) -> Tuple[HPKESession, bytes]:
+def create_client_hpke_session(
+    server_pub_bytes: bytes,
+    nonce: Optional[bytes] = None,
+) -> Tuple[HPKESession, bytes]:
     """
     Performs RFC 9180 DHKEM(X25519, HKDF-SHA256) key agreement with the CVM public key.
+    Optionally accepts a 12-byte request nonce to bind into response key derivation.
     Returns: (session, client_ephemeral_public_key_bytes)
     """
     if len(server_pub_bytes) != 32:
@@ -276,6 +301,13 @@ def create_client_hpke_session(server_pub_bytes: bytes) -> Tuple[HPKESession, by
 
     if server_pub_bytes in LOW_ORDER_X25519_BYTES:
         raise HPKEError("Recipient public key is a low-order Curve25519 point (RFC 7748)")
+
+    if nonce is not None:
+        if len(nonce) != 12:
+            raise HPKEError(f"Request nonce must be exactly 12 bytes (got {len(nonce)})")
+        req_nonce = nonce
+    else:
+        req_nonce = secrets.token_bytes(12)
 
     server_pub = x25519.X25519PublicKey.from_public_bytes(server_pub_bytes)
     client_priv = x25519.X25519PrivateKey.generate()
@@ -287,23 +319,24 @@ def create_client_hpke_session(server_pub_bytes: bytes) -> Tuple[HPKESession, by
 
     shared_secret_buf = bytearray(raw_shared)
     try:
-        def hkdf_expand(info: bytes, length: int) -> bytes:
+        def hkdf_expand(info: bytes, length: int, salt: Optional[bytes] = None) -> bytes:
             return HKDF(
                 algorithm=hashes.SHA256(),
                 length=length,
-                salt=None,
+                salt=salt,
                 info=info,
             ).derive(bytes(shared_secret_buf))
 
-        req_key = hkdf_expand(b"cevell-hpke-req-aes-gcm", 32)
-        resp_key = hkdf_expand(b"cevell-hpke-resp-aes-gcm", 32)
-        resp_base_iv = hkdf_expand(b"cevell-hpke-resp-base-iv", 12)
+        req_key = hkdf_expand(b"cevell-hpke-req-aes-gcm", 32, salt=None)
+        resp_key = hkdf_expand(b"cevell-hpke-resp-aes-gcm", 32, salt=req_nonce)
+        resp_base_iv = hkdf_expand(b"cevell-hpke-resp-base-iv", 12, salt=req_nonce)
 
         session = HPKESession(
             client_pub_bytes=client_pub_bytes,
             req_key=req_key,
             resp_key=resp_key,
             resp_base_iv=resp_base_iv,
+            req_nonce=req_nonce,
         )
         return session, client_pub_bytes
     finally:

@@ -15,7 +15,8 @@ import struct
 from typing import Optional
 
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -218,8 +219,8 @@ class TestOxSDK(unittest.TestCase):
         from cevell_tunnel.crypto import compute_frame_nonce, compute_frame_aad
 
         req_key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"cevell-hpke-req-aes-gcm").derive(shared_secret)
-        resp_key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"cevell-hpke-resp-aes-gcm").derive(shared_secret)
-        resp_iv = HKDF(algorithm=hashes.SHA256(), length=12, salt=None, info=b"cevell-hpke-resp-base-iv").derive(shared_secret)
+        resp_key = HKDF(algorithm=hashes.SHA256(), length=32, salt=nonce, info=b"cevell-hpke-resp-aes-gcm").derive(shared_secret)
+        resp_iv = HKDF(algorithm=hashes.SHA256(), length=12, salt=nonce, info=b"cevell-hpke-resp-base-iv").derive(shared_secret)
 
         decrypted_req = AESGCM(req_key).decrypt(nonce, ciphertext, None)
         self.assertEqual(decrypted_req, plaintext)
@@ -263,11 +264,35 @@ class TestOxSDK(unittest.TestCase):
         self.assertEqual(client_session._req_key, bytearray(b"\x00" * 32))
         self.assertEqual(client_session._resp_key, bytearray(b"\x00" * 32))
         self.assertEqual(client_session._resp_base_iv, bytearray(b"\x00" * 12))
+        self.assertIsNone(client_session.req_nonce)
         self.assertEqual(client_session.expected_seq, 0)
         with self.assertRaises(HPKEError):
             client_session.encrypt_request(b"test")
         with self.assertRaises(HPKEError):
             client_session.decrypt_frame(0, 1, b"ct", b"tag", 0)
+
+    def test_crypto_hpke_nonce_binding_derives_unique_keys(self):
+        server_priv = x25519.X25519PrivateKey.generate()
+        server_pub_bytes = server_priv.public_key().public_bytes_raw()
+
+        nonce1 = b"\x01" * 12
+        nonce2 = b"\x02" * 12
+
+        session1, _ = create_client_hpke_session(server_pub_bytes, nonce=nonce1)
+        session2, _ = create_client_hpke_session(server_pub_bytes, nonce=nonce2)
+
+        self.assertNotEqual(session1.resp_key, session2.resp_key)
+        self.assertNotEqual(session1.resp_base_iv, session2.resp_base_iv)
+        self.assertEqual(bytes(session1.req_nonce), nonce1)
+        self.assertEqual(bytes(session2.req_nonce), nonce2)
+
+        # Reusing the exact same client private key with two different nonces
+        # guarantees distinct response encryption keys and IVs
+        client_priv = x25519.X25519PrivateKey.generate()
+        shared = client_priv.exchange(server_priv.public_key())
+        k1 = HKDF(hashes.SHA256(), 32, salt=nonce1, info=b"cevell-hpke-resp-aes-gcm").derive(shared)
+        k2 = HKDF(hashes.SHA256(), 32, salt=nonce2, info=b"cevell-hpke-resp-aes-gcm").derive(shared)
+        self.assertNotEqual(k1, k2)
 
         # Test all RFC 7748 Table 6 low-order points rejection
         for low_order_pt in LOW_ORDER_X25519_BYTES:
