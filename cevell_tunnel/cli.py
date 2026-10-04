@@ -60,8 +60,8 @@ def main():
         )
         proxy_parser.add_argument(
             "--release",
-            default="v1.0.0",
-            help="Expected official GitHub release tag for code measurement verification (default: v1.0.0)",
+            default="latest",
+            help="Expected official GitHub release tag for code measurement verification (default: latest)",
         )
         proxy_parser.add_argument(
             "--expected-rtmr1",
@@ -143,8 +143,8 @@ def main():
         )
         load_parser.add_argument(
             "--release",
-            default="v1.0.0",
-            help="Expected official GitHub release tag for code measurement verification (default: v1.0.0)",
+            default="latest",
+            help="Expected official GitHub release tag for code measurement verification (default: latest)",
         )
         load_parser.add_argument(
             "--expected-rtmr1",
@@ -270,8 +270,8 @@ def main():
     )
     parser.add_argument(
         "--release",
-        default="v1.0.0",
-        help="Expected official GitHub release tag for code measurement verification (default: v1.0.0)",
+        default="latest",
+        help="Expected official GitHub release tag for code measurement verification (default: latest)",
     )
     parser.add_argument(
         "--expected-rtmr1",
