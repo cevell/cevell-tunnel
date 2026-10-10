@@ -8,7 +8,7 @@ long_description = readme_path.read_text(encoding="utf-8") if readme_path.exists
 
 init_path = this_directory / "cevell_tunnel" / "__init__.py"
 version_match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', init_path.read_text(encoding="utf-8"), re.M)
-version = version_match.group(1) if version_match else "0.2.0"
+version = version_match.group(1) if version_match else "0.3.0"
 
 setup(
     name="cevell-tunnel",
