@@ -1,6 +1,6 @@
 """
-ox.proxy — Agnostic Local Loopback Proxy Daemon
-================================================
+cevell_tunnel.proxy — Agnostic Local Loopback Proxy Daemon
+==========================================================
 Spins up a lightweight local loopback HTTP server (127.0.0.1:8080) that transparently
 intercepts standard unencrypted HTTP requests from any application, CLI tool, or SDK
 (curl, LangChain, Cursor IDE, Continue.dev, Python, Go, Rust), performing hardware
@@ -16,14 +16,17 @@ import sys
 import json
 import socket
 import logging
+import secrets
+import urllib.parse
 import urllib.request
 import urllib.error
 from typing import Optional, Dict, Any, Union
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 
 from .tunnel import ConfidentialTunnel, TunnelError
+from .crypto import sign_canonical_request
 
-logger = logging.getLogger("ox.proxy")
+logger = logging.getLogger("cevell_tunnel.proxy")
 
 
 class TunnelProxyHandler(BaseHTTPRequestHandler):
@@ -71,6 +74,17 @@ class TunnelProxyHandler(BaseHTTPRequestHandler):
         if path.startswith("/v1/attestation") or path.startswith("/.well-known/") or path == "/v1/health":
             target_url = f"{self.tunnel.base_url}{path}"
             fwd_headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length")}
+            # If tunnel has an enrolled signing key, sign discovery/health requests to support sealed CVM enclaves
+            if self.tunnel.priv_key and not any(k.lower() == "authorization" for k in fwd_headers):
+                parsed_path = urllib.parse.urlparse(path).path
+                signed = sign_canonical_request(
+                    priv_key=self.tunnel.priv_key,
+                    method=method.upper(),
+                    path=parsed_path,
+                    body_bytes=body_bytes or b"",
+                    request_id=f"req-{secrets.token_hex(8)}",
+                )
+                fwd_headers.update(signed)
             req = urllib.request.Request(target_url, data=body_bytes if body_bytes else None, headers=fwd_headers, method=method)
             try:
                 with self.tunnel._opener.open(req, timeout=self.tunnel.timeout) as resp:

@@ -1,6 +1,6 @@
 """
-ox.attestation — Multi-Tier Silicon Attestation & Key Binding Verifier
-======================================================================
+cevell_tunnel.attestation — Multi-Tier Silicon Attestation & Key Binding Verifier
+=================================================================================
 Verifies hardware claims from Confidential Virtual Machines:
   1. NVIDIA Hopper / Blackwell H100 DICE X.509 Certificate Chain verification
      anchored to official NVIDIA Device Identity Root CA.

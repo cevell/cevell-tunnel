@@ -1,6 +1,6 @@
 """
-ox.client — High-Level Attestation-Verified Confidential CVM Client
-===================================================================
+cevell_tunnel.client — High-Level Attestation-Verified Confidential CVM Client
+==============================================================================
 Provides a seamless, OpenAI-compatible client for confidential inference:
   - Fetches and verifies hardware attestation (NVIDIA DICE + Intel TDX / AMD SEV-SNP)
   - Cryptographically verifies TDX quotes, DICE leaf signatures, and vendor CRL status
@@ -125,7 +125,7 @@ class CVMClient:
         cvm_url: Optional[str] = None,
         ip: Optional[str] = None,
         port: int = 443,
-        auth_key: Union[str, bytes] = "auth.pem",
+        auth_key: Optional[Union[str, bytes]] = "auth.pem",
         default_model: Optional[str] = None,
         verify_attestation: bool = True,
         verify_code: bool = True,
@@ -169,7 +169,7 @@ class CVMClient:
         self.allow_mock_attestation = allow_mock_attestation
 
         # 1. Load the latched tenant Ed25519 authentication private key
-        self.priv_key = load_auth_key(auth_key)
+        self.priv_key = load_auth_key(auth_key) if auth_key is not None else None
 
         # 2. SSL Context (permissive of self-signed TLS because channel identity is anchored to TDX/SEV silicon)
         self.ssl_ctx = ssl.create_default_context()
@@ -199,9 +199,19 @@ class CVMClient:
         req_nonce = nonce or secrets.token_hex(32)
         url = f"{self.base_url}/v1/attestation?nonce={req_nonce}"
 
+        auth_headers = {}
+        if self.priv_key:
+            auth_headers = sign_canonical_request(
+                priv_key=self.priv_key,
+                method="GET",
+                path="/v1/attestation",
+                body_bytes=b"",
+                request_id=f"req-{secrets.token_hex(8)}",
+            )
+
         opener, handler = self._create_attestation_opener()
 
-        req = urllib.request.Request(url, method="GET")
+        req = urllib.request.Request(url, headers=auth_headers, method="GET")
         data = None
         try:
             with opener.open(req, timeout=self.timeout) as resp:
@@ -213,7 +223,16 @@ class CVMClient:
         except Exception:
             # Fallback to legacy path if /v1/attestation not routed
             url = f"{self.base_url}/.well-known/cevell-attestation?nonce={req_nonce}"
-            req = urllib.request.Request(url, method="GET")
+            fb_headers = {}
+            if self.priv_key:
+                fb_headers = sign_canonical_request(
+                    priv_key=self.priv_key,
+                    method="GET",
+                    path="/.well-known/cevell-attestation",
+                    body_bytes=b"",
+                    request_id=f"req-{secrets.token_hex(8)}",
+                )
+            req = urllib.request.Request(url, headers=fb_headers, method="GET")
             with opener.open(req, timeout=self.timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
 
@@ -238,7 +257,16 @@ class CVMClient:
         # digest sha256(cfg.AttestationDoc.Predicate.UserData). Fetch the boot quote to ensure
         # the inference request binding hash aligns with the in-enclave proxy supervisor.
         try:
-            boot_req = urllib.request.Request(f"{self.base_url}/v1/attestation", method="GET")
+            boot_headers = {}
+            if self.priv_key:
+                boot_headers = sign_canonical_request(
+                    priv_key=self.priv_key,
+                    method="GET",
+                    path="/v1/attestation",
+                    body_bytes=b"",
+                    request_id=f"req-{secrets.token_hex(8)}",
+                )
+            boot_req = urllib.request.Request(f"{self.base_url}/v1/attestation", headers=boot_headers, method="GET")
             with opener.open(boot_req, timeout=self.timeout) as boot_resp:
                 if boot_resp.status == 200:
                     boot_doc = json.loads(boot_resp.read().decode("utf-8"))
@@ -355,7 +383,16 @@ class CVMClient:
     def get_active_model(self) -> str:
         """Discovers the currently loaded model on the CVM from /v1/health."""
         try:
-            req = urllib.request.Request(f"{self.base_url}/v1/health", method="GET")
+            health_headers = {}
+            if self.priv_key:
+                health_headers = sign_canonical_request(
+                    priv_key=self.priv_key,
+                    method="GET",
+                    path="/v1/health",
+                    body_bytes=b"",
+                    request_id=f"req-{secrets.token_hex(8)}",
+                )
+            req = urllib.request.Request(f"{self.base_url}/v1/health", headers=health_headers, method="GET")
             with self._opener.open(req, timeout=5.0) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 if data.get("model"):

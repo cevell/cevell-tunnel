@@ -1,6 +1,6 @@
 """
-ox.tunnel — Agnostic Confidential Byte-Stream Tunnel
-====================================================
+cevell_tunnel.tunnel — Agnostic Confidential Byte-Stream Tunnel
+==============================================================
 Provides an agnostic, payload-independent transport tunnel between local callers
 and confidential CVM enclaves:
   - Verifies hardware silicon attestation (Intel TDX / NVIDIA Hopper / AMD SEV-SNP)
@@ -107,7 +107,7 @@ class ConfidentialTunnel:
         cvm_url: Optional[str] = None,
         ip: Optional[str] = None,
         port: int = 443,
-        auth_key: Union[str, bytes] = "auth.pem",
+        auth_key: Optional[Union[str, bytes]] = "auth.pem",
         verify_attestation: bool = True,
         verify_code: bool = True,
         expected_release: Optional[str] = "latest",
@@ -151,7 +151,7 @@ class ConfidentialTunnel:
         self.allow_insecure_http = allow_insecure_http
 
         # 1. Load tenant Ed25519 signing key
-        self.priv_key = load_auth_key(auth_key)
+        self.priv_key = load_auth_key(auth_key) if auth_key is not None else None
 
         # 2. SSL context with disabled standard WebPKI validation (anchored to silicon SPKI)
         self.ssl_ctx = ssl.create_default_context()
@@ -334,6 +334,8 @@ class ConfidentialTunnel:
             )
 
             # Canonical Ed25519 signature over request path, headers, and Protobuf body hash
+            if not self.priv_key:
+                raise ValueError("Tenant Ed25519 authentication private key is required for inference.")
             signed_headers = sign_canonical_request(
                 priv_key=self.priv_key,
                 method=method.upper(),
@@ -362,13 +364,16 @@ class ConfidentialTunnel:
 
             # Direct authenticated JSON / plaintext transmission
             req_id = f"req-{secrets.token_hex(8)}"
-            signed_headers = sign_canonical_request(
-                priv_key=self.priv_key,
-                method=method.upper(),
-                path=effective_path,
-                body_bytes=body_bytes,
-                request_id=req_id,
-            )
+            if self.priv_key:
+                signed_headers = sign_canonical_request(
+                    priv_key=self.priv_key,
+                    method=method.upper(),
+                    path=effective_path,
+                    body_bytes=body_bytes,
+                    request_id=req_id,
+                )
+            else:
+                signed_headers = {}
             out_headers = {
                 k: v for k, v in (headers or {}).items()
                 if k.lower() not in ("content-length", "transfer-encoding", "host")

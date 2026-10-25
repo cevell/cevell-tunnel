@@ -1,6 +1,6 @@
 """
-ox.crypto — Cryptographic Primitives for Latched Auth and RFC 9180 HPKE
-======================================================================
+cevell_tunnel.crypto — Cryptographic Primitives for Latched Auth and RFC 9180 HPKE
+==================================================================================
 Handles:
   - Ed25519 key loading (OpenSSH and PEM format)
   - Canonical request signing with body SHA-256 (Anti-replay + Header-first validation)

@@ -1,6 +1,6 @@
 """
-ox.transport — Agnostic Confidential HTTPX Transport for Mature SDKs
-=====================================================================
+cevell_tunnel.transport — Agnostic Confidential HTTPX Transport for Mature SDKs
+==============================================================================
 Plugs the zero-trust hardware attestation and HPKE envelope encryption layer
 directly into standard HTTP clients (such as the official `openai` or `anthropic` SDKs):
   - Subclasses `httpx.BaseTransport` (sync) and `httpx.AsyncBaseTransport` (async)
@@ -121,8 +121,8 @@ if HAS_HTTPX:
             raw_body = request.read()
             path = request.url.raw_path.decode("ascii")
 
-            # Bypass envelope encryption for unauthenticated/discovery routes
-            if path.startswith("/v1/attestation") or path.startswith("/.well-known/"):
+            # Bypass envelope encryption for unauthenticated/discovery routes and health checks
+            if path.startswith("/v1/attestation") or path.startswith("/.well-known/") or path == "/v1/health" or path.startswith("/v1/health?"):
                 req_headers = dict(request.headers)
                 if self.tunnel.priv_key:
                     clean_path = path.split("?")[0]

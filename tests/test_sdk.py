@@ -780,6 +780,155 @@ class TestOxSDK(unittest.TestCase):
         self.assertEqual(payload3["model"], "custom-model")
         self.assertEqual(payload3["quantization"], "bitsandbytes")
 
+    def test_client_post_seal_attestation_and_health_authentication(self):
+        priv_key = ed25519.Ed25519PrivateKey.generate()
+        pem = priv_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        client = CVMClient(
+            cvm_url="https://127.0.0.1:8080",
+            auth_key=pem,
+            verify_attestation=False,
+            allow_mock_attestation=True,
+        )
+
+        tls_fp = b"\x22" * 32
+        hpke_pub = b"\x11" * 32
+        nonce_hex = "bb" * 32
+        nonce_bytes = bytes.fromhex(nonce_hex)
+        second_half = hashlib.sha256(hpke_pub + nonce_bytes + (b"\x00" * 32)).digest()
+        user_data = tls_fp + second_half
+        doc = {
+            "_type": "https://in-toto.io/Statement/v1",
+            "predicateType": "https://in-toto.io/attestation/confidential-computing/v0.1",
+            "subject": [],
+            "predicate": {
+                "platform": "intel-tdx",
+                "tls_fingerprint": tls_fp.hex(),
+                "hpke_public_key": hpke_pub.hex(),
+                "user_data": user_data.hex(),
+                "nonce": nonce_hex,
+            }
+        }
+
+        captured_attestation_requests = []
+
+        class MockAttestationResp:
+            def __init__(self, doc_json):
+                self.body = json.dumps(doc_json).encode("utf-8")
+                self.status = 200
+
+            def read(self, *args):
+                return self.body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        class MockAttestationOpener:
+            def open(self, req, timeout=None):
+                captured_attestation_requests.append(req)
+                return MockAttestationResp(doc)
+
+        class MockHandler:
+            last_conn = None
+
+        client._create_attestation_opener = lambda: (MockAttestationOpener(), MockHandler())
+        res = client.audit_and_bind_attestation(nonce=nonce_hex)
+        self.assertIsNotNone(res)
+        self.assertGreater(len(captured_attestation_requests), 0)
+
+        # Verify primary attestation query includes canonical Ed25519 headers for sealed CVM compatibility
+        prim_req = captured_attestation_requests[0]
+        headers_lower = {k.lower(): v for k, v in prim_req.headers.items()}
+        self.assertIn("authorization", headers_lower)
+        self.assertTrue(headers_lower["authorization"].startswith("Cevell-Ed25519"))
+        self.assertIn("x-signature", headers_lower)
+        self.assertIn("x-cevell-body-sha256", headers_lower)
+
+        # Verify health probe also includes canonical Ed25519 headers for sealed CVM compatibility
+        captured_health_requests = []
+        class MockHealthOpener:
+            def open(self, req, timeout=None):
+                captured_health_requests.append(req)
+                return MockAttestationResp({"status": "ok", "model": "Qwen/Qwen2.5-7B-Instruct"})
+
+        client._opener = MockHealthOpener()
+        active_model = client.get_active_model()
+        self.assertEqual(active_model, "Qwen/Qwen2.5-7B-Instruct")
+        self.assertEqual(len(captured_health_requests), 1)
+        health_req = captured_health_requests[0]
+        health_headers_lower = {k.lower(): v for k, v in health_req.headers.items()}
+        self.assertIn("authorization", health_headers_lower)
+        self.assertTrue(health_headers_lower["authorization"].startswith("Cevell-Ed25519"))
+
+    def test_client_unsealed_attestation_without_auth_key(self):
+        client = CVMClient(
+            cvm_url="https://127.0.0.1:8080",
+            auth_key=None,
+            verify_attestation=False,
+            allow_mock_attestation=True,
+        )
+        self.assertIsNone(client.priv_key)
+
+        tls_fp = b"\x22" * 32
+        hpke_pub = b"\x11" * 32
+        nonce_hex = "cc" * 32
+        nonce_bytes = bytes.fromhex(nonce_hex)
+        second_half = hashlib.sha256(hpke_pub + nonce_bytes + (b"\x00" * 32)).digest()
+        user_data = tls_fp + second_half
+        doc = {
+            "_type": "https://in-toto.io/Statement/v1",
+            "predicateType": "https://in-toto.io/attestation/confidential-computing/v0.1",
+            "subject": [],
+            "predicate": {
+                "platform": "intel-tdx",
+                "tls_fingerprint": tls_fp.hex(),
+                "hpke_public_key": hpke_pub.hex(),
+                "user_data": user_data.hex(),
+                "nonce": nonce_hex,
+            }
+        }
+
+        captured_requests = []
+
+        class MockAttestationResp:
+            def __init__(self, doc_json):
+                self.body = json.dumps(doc_json).encode("utf-8")
+                self.status = 200
+
+            def read(self, *args):
+                return self.body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        class MockAttestationOpener:
+            def open(self, req, timeout=None):
+                captured_requests.append(req)
+                return MockAttestationResp(doc)
+
+        class MockHandler:
+            last_conn = None
+
+        client._create_attestation_opener = lambda: (MockAttestationOpener(), MockHandler())
+        res = client.audit_and_bind_attestation(nonce=nonce_hex)
+        self.assertIsNotNone(res)
+        self.assertGreater(len(captured_requests), 0)
+
+        # Unauthenticated request sent without auth headers for unsealed public discovery
+        req = captured_requests[0]
+        headers_lower = {k.lower(): v for k, v in req.headers.items()}
+        self.assertNotIn("authorization", headers_lower)
+        self.assertNotIn("x-cevell-signature", headers_lower)
+
 
 if __name__ == "__main__":
     unittest.main()
